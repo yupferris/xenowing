@@ -1,18 +1,32 @@
 use kaze::*;
 
-pub fn generate<'a>(c: &'a Context<'a>) -> &Module<'a> {
-    let m = c.module("Lfsr");
+pub struct Lfsr<'a> {
+    pub m: &'a Module<'a>,
+    pub shift_enable: &'a Input<'a>,
+    pub value: &'a Output<'a>,
+}
 
-    let state = m.reg("state", 16);
-    state.default_value(0xace1u32);
-    m.output("value", state.value.bits(7, 0));
+impl<'a> Lfsr<'a> {
+    pub fn new<S: Into<String>, P: ModuleParent<'a>>(instance_name: S, p: &'a P) -> Lfsr<'a> {
+        let m = p.module(instance_name, "Lfsr");
 
-    state.drive_next(if_(m.input("shift_enable", 1), {
-        let feedback_bit = state.value.bit(0) ^ state.value.bit(2) ^ state.value.bit(3) ^ state.value.bit(5);
-        feedback_bit.concat(state.value.bits(15, 1))
-    }).else_({
-        state.value
-    }));
+        let shift_enable = m.input("shift_enable", 1);
 
-    m
+        let state = m.reg("state", 16);
+        state.default_value(0xace1u32);
+        let value = m.output("value", state.bits(7, 0));
+
+        state.drive_next(if_(shift_enable, {
+            let feedback_bit = state.bit(0) ^ state.bit(2) ^ state.bit(3) ^ state.bit(5);
+            feedback_bit.concat(state.bits(15, 1))
+        }).else_({
+            state
+        }));
+
+        Lfsr {
+            m,
+            shift_enable,
+            value,
+        }
+    }
 }

@@ -13,5 +13,6 @@ fn main() -> Result<()> {
 
     let c = Context::new();
 
-    sim::generate(peek_buffer::generate(&c, "PeekBuffer", 32), sim::GenerationOptions::default(), file)
+    let peek_buffer = PeekBuffer::new("peek_buffer", 32, &c);
+    sim::generate(peek_buffer.m, sim::GenerationOptions::default(), file)
 }

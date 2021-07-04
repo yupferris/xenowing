@@ -1,35 +1,52 @@
+use crate::uart::*;
+use super::lfsr::*;
+
 use kaze::*;
 
-pub fn generate<'a>(c: &'a Context<'a>) -> &Module<'a> {
-    let m = c.module("Uart");
+pub struct Uart<'a> {
+    pub m: &'a Module<'a>,
+    pub rx: &'a Input<'a>,
+    pub tx: &'a Output<'a>,
+    pub has_errored: &'a Output<'a>,
+}
 
-    let has_errored = m.reg("has_errored", 1);
-    has_errored.default_value(false);
-    m.output("has_errored", has_errored.value);
+impl<'a> Uart<'a> {
+    pub fn new<S: Into<String>, P: ModuleParent<'a>>(instance_name: S, p: &'a P) -> Uart<'a> {
+        let m = p.module(instance_name, "Uart");
 
-    let write_enable = !has_errored.value;
+        let has_errored = m.reg("has_errored", 1);
+        has_errored.default_value(false);
 
-    let uart_tx = m.instance("uart_tx", "UartTx");
-    uart_tx.drive_input("enable", write_enable);
-    m.output("tx", uart_tx.output("tx"));
+        let write_enable = !has_errored;
 
-    let tx_lfsr = m.instance("tx_lfsr", "Lfsr");
-    tx_lfsr.drive_input("shift_enable", write_enable & uart_tx.output("ready"));
-    uart_tx.drive_input("data", tx_lfsr.output("value"));
+        let uart_tx = UartTx::new("uart_tx", 100000000, 460800, p);
+        uart_tx.enable.drive(write_enable);
+        let tx = m.output("tx", uart_tx.tx);
 
-    let uart_rx = m.instance("uart_rx", "UartRx");
-    uart_rx.drive_input("rx", m.input("rx", 1));
-    let read_data = uart_rx.output("data");
-    let read_data_valid = uart_rx.output("data_valid");
+        let tx_lfsr = Lfsr::new("tx_lfsr", p);
+        tx_lfsr.shift_enable.drive(write_enable & uart_tx.ready);
+        uart_tx.data.drive(tx_lfsr.value);
 
-    let rx_lfsr = m.instance("rx_lfsr", "Lfsr");
-    rx_lfsr.drive_input("shift_enable", read_data_valid);
+        let rx = m.input("rx", 1);
+        let uart_rx = UartRx::new("uart_rx", 100000000, 460800, p);
+        uart_rx.rx.drive(rx);
+        let read_data = uart_rx.data;
+        let read_data_valid = uart_rx.data_valid;
 
-    has_errored.drive_next(if_(read_data_valid, {
-        read_data.ne(rx_lfsr.output("value"))
-    }).else_({
-        has_errored.value
-    }));
+        let rx_lfsr = Lfsr::new("rx_lfsr", p);
+        rx_lfsr.shift_enable.drive(read_data_valid);
 
-    m
+        has_errored.drive_next(if_(read_data_valid, {
+            read_data.ne(rx_lfsr.value)
+        }).else_({
+            has_errored
+        }));
+
+        Uart {
+            m,
+            rx,
+            tx,
+            has_errored: m.output("has_errored", has_errored),
+        }
+    }
 }

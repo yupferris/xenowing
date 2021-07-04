@@ -34,7 +34,7 @@ fn main() -> io::Result<()> {
 
     let trace = build_trace("Pipe__fuzz")?;
 
-    let mut m = Pipe::new("m", trace)?;
+    let mut m = Pipe::new(trace)?;
     let mut time_stamp = 0;
 
     m.reset();

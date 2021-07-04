@@ -40,7 +40,7 @@ dependencies = [
 name = "approx-reciprocal"
 version = "0.1.0"
 dependencies = [
- "kaze",
+ "kaze 0.1.19",
  "rtl",
 ]
 
@@ -66,7 +66,7 @@ checksum = "cf1de2fe8c75bc145a2f577add951f8134889b4795d47466a54a5c846d691693"
 name = "buster"
 version = "0.1.0"
 dependencies = [
- "kaze",
+ "kaze 0.1.19",
  "rtl",
 ]
 
@@ -209,7 +209,7 @@ checksum = "cd56b59865bce947ac5958779cfa508f6c3b9497cc762b7e24a12d11ccde2c4f"
 name = "fifo"
 version = "0.1.0"
 dependencies = [
- "kaze",
+ "kaze 0.1.19",
  "rand 0.7.3",
  "rand_chacha 0.2.2",
  "rtl",
@@ -219,7 +219,7 @@ dependencies = [
 name = "flow-controlled-pipe"
 version = "0.1.0"
 dependencies = [
- "kaze",
+ "kaze 0.1.19",
  "rand 0.7.3",
  "rand_chacha 0.2.2",
  "rtl",
@@ -311,6 +311,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "kaze"
+version = "0.1.19"
+dependencies = [
+ "typed-arena",
+ "vcd",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -390,7 +398,7 @@ name = "marv"
 version = "0.1.0"
 dependencies = [
  "goblin",
- "kaze",
+ "kaze 0.1.19",
  "rtl",
 ]
 
@@ -553,7 +561,7 @@ dependencies = [
 name = "peek-buffer"
 version = "0.1.0"
 dependencies = [
- "kaze",
+ "kaze 0.1.19",
  "rand 0.7.3",
  "rand_chacha 0.2.2",
  "rtl",
@@ -810,7 +818,7 @@ dependencies = [
 name = "read-cache"
 version = "0.1.0"
 dependencies = [
- "kaze",
+ "kaze 0.1.18",
  "rand 0.7.3",
  "rand_chacha 0.2.2",
  "rtl",
@@ -853,7 +861,7 @@ dependencies = [
 name = "rtl"
 version = "0.1.0"
 dependencies = [
- "kaze",
+ "kaze 0.1.19",
 ]
 
 [[package]]
@@ -970,7 +978,7 @@ name = "strugl"
 version = "0.1.0"
 dependencies = [
  "image",
- "kaze",
+ "kaze 0.1.19",
  "minifb",
  "rand 0.7.3",
  "rand_pcg 0.2.1",
@@ -1223,7 +1231,7 @@ name = "xw-blaster"
 version = "0.1.0"
 dependencies = [
  "image",
- "kaze",
+ "kaze 0.1.18",
  "minifb",
  "rand 0.7.3",
  "rtl",

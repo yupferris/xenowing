@@ -1,182 +1,246 @@
-use crate::buster;
-use crate::read_cache;
+use crate::buster::*;
+use crate::read_cache::*;
 use super::*;
 
 use kaze::*;
 
-pub fn generate<'a>(c: &'a Context<'a>) -> &Module<'a> {
-    let m = c.module("TexCache");
+use std::collections::HashMap;
 
-    let invalidate = m.input("invalidate", 1);
+pub struct TexCache<'a> {
+    pub m: &'a Module<'a>,
 
-    let in_valid = m.input("in_valid", 1);
+    invalidate: &'a Input<'a>,
+    in_valid: &'a Input<'a>,
+    in_ready: &'a Output<'a>,
+    out_valid: &'a Output<'a>,
 
-    let issue_buffer_occupied = m.reg("issue_buffer_occupied", 1);
-    issue_buffer_occupied.default_value(false);
+    in_tex_buffer_read_addrs: Vec<&'a Input<'a>>,
+    out_tex_buffer_read_values: Vec<&'a Output<'a>>,
 
-    buster::generate(c, "BlockCacheCrossbar", 4, 1, TEX_WORD_ADDR_BITS, 0, 128, 5);
-    let block_cache_crossbar = m.instance("block_cache_crossbar", "BlockCacheCrossbar");
-    block_cache_crossbar.drive_input("replica0_bus_ready", m.input("replica_bus_ready", 1));
-    m.output("replica_bus_enable", block_cache_crossbar.output("replica0_bus_enable"));
-    m.output("replica_bus_addr", block_cache_crossbar.output("replica0_bus_addr"));
-    block_cache_crossbar.drive_input("replica0_bus_read_data", m.input("replica_bus_read_data", 128));
-    block_cache_crossbar.drive_input("replica0_bus_read_data_valid", m.input("replica_bus_read_data_valid", 1));
+    replica_port: ReplicaPort<'a>,
 
-    generate_block_cache(c, "BlockCache");
-    let mut acc = None;
-    let block_caches = (0..4).map(|i| {
-        let block_cache = m.instance(format!("block_cache{}", i), "BlockCache");
-        block_cache.drive_input("invalidate", invalidate);
-        let addr = m.input(format!("in_tex_buffer{}_read_addr", i), TEX_PIXEL_ADDR_BITS);
-        block_cache.drive_input("in_addr", addr);
-        let return_data = block_cache.output("return_data");
-        m.output(format!("out_tex_buffer{}_read_value", i), return_data);
-
-        block_cache.drive_input("replica_bus_ready", block_cache_crossbar.output(format!("primary{}_bus_ready", i)));
-        block_cache_crossbar.drive_input(format!("primary{}_bus_enable", i), block_cache.output("replica_bus_enable"));
-        block_cache_crossbar.drive_input(format!("primary{}_bus_addr", i), block_cache.output("replica_bus_addr"));
-        block_cache.drive_input("replica_bus_read_data", block_cache_crossbar.output(format!("primary{}_bus_read_data", i)));
-        block_cache.drive_input("replica_bus_read_data_valid", block_cache_crossbar.output(format!("primary{}_bus_read_data_valid", i)));
-        // TODO: Consider read-only/write-only crossbar ports
-        block_cache_crossbar.drive_input(format!("primary{}_bus_write", i), m.low());
-        block_cache_crossbar.drive_input(format!("primary{}_bus_write_data", i), m.lit(0u32, 128));
-        block_cache_crossbar.drive_input(format!("primary{}_bus_write_byte_enable", i), m.lit(0u32, 16));
-        let in_ready = block_cache.output("in_ready");
-        let return_data_valid = block_cache.output("return_data_valid");
-        acc = Some(match acc {
-            Some((acc_in_ready, acc_return_data_valid)) => (acc_in_ready & in_ready, acc_return_data_valid & return_data_valid),
-            _ => (in_ready, return_data_valid)
-        });
-
-        block_cache
-    }).collect::<Vec<_>>();
-    let (caches_in_ready, caches_return_data_valid) = acc.unwrap();
-
-    let out_valid = issue_buffer_occupied.value & caches_return_data_valid;
-    m.output("out_valid", out_valid);
-
-    //  Note that we exploit implementation details of `ReadCache` - namely that we
-    //   know that its `primary_bus_ready` output is independent of its
-    //   `replica_bus_ready` input, so regardless of arbitration or whatever else we
-    //   connect between the caches on the replica side (which may introduce some
-    //   interdepencies), we know that they can be in a state where all of them can
-    //   accept reads simultaneously. This simplifies issue logic in this cache.
-    let can_accept_issue = caches_in_ready & (!issue_buffer_occupied.value | caches_return_data_valid);
-    m.output("in_ready", can_accept_issue);
-
-    let accept_issue = can_accept_issue & in_valid;
-
-    issue_buffer_occupied.drive_next(if_(accept_issue, {
-        m.high()
-    }).else_if(out_valid, {
-        m.low()
-    }).else_({
-        issue_buffer_occupied.value
-    }));
-
-    for block_cache in block_caches {
-        block_cache.drive_input("issue", accept_issue);
-    }
-
-    for (name, bit_width) in [
-        ("tile_addr", TILE_PIXELS_BITS),
-
-        ("r", 9),
-        ("g", 9),
-        ("b", 9),
-        ("a", 9),
-
-        ("z", 16),
-
-        ("depth_test_result", 1),
-
-        ("s_fract", ST_FILTER_FRACT_BITS + 1),
-        ("one_minus_s_fract", ST_FILTER_FRACT_BITS + 1),
-        ("t_fract", ST_FILTER_FRACT_BITS + 1),
-        ("one_minus_t_fract", ST_FILTER_FRACT_BITS + 1),
-    ].iter() {
-        let in_ = m.input(format!("in_{}", name), *bit_width);
-        let reg = m.reg(format!("{}_forward", name), *bit_width);
-        reg.drive_next(if_(accept_issue, {
-            in_
-        }).else_({
-            reg.value
-        }));
-        m.output(format!("out_{}", name), reg.value);
-    }
-
-    m
+    forward_inputs: HashMap<String, &'a Input<'a>>,
+    forward_outputs: HashMap<String, &'a Output<'a>>,
 }
 
-fn generate_block_cache<'a, S: Into<String>>(c: &'a Context<'a>, mod_name: S) -> &Module<'a> {
-    let mod_name = mod_name.into();
+impl<'a> TexCache<'a> {
+    pub fn new<S: Into<String>, P: ModuleParent<'a>>(instance_name: S, p: &'a P) -> TexCache<'a> {
+        let m = p.module(instance_name, "TexCache");
 
-    let m = c.module(&mod_name);
+        let invalidate = m.input("invalidate", 1);
 
-    let invalidate = m.input("invalidate", 1);
+        let in_valid = m.input("in_valid", 1);
 
-    // TODO: Properly expose/check these parameters!
-    let read_cache_mod_name = format!("{}ReadCache", mod_name);
-    read_cache::generate(c, &read_cache_mod_name, 128, TEX_WORD_ADDR_BITS, TEX_WORD_ADDR_BITS - 3);
-    let read_cache = m.instance("read_cache", &read_cache_mod_name);
+        let issue_buffer_occupied = m.reg("issue_buffer_occupied", 1);
+        issue_buffer_occupied.default_value(false);
 
-    read_cache.drive_input("invalidate", invalidate);
+        let block_cache_crossbar = Crossbar::new("block_cache_crossbar", 4, 1, TEX_WORD_ADDR_BITS, 0, 128, 5, m);
+        let replica_port = block_cache_crossbar.replica_ports[0].forward("replica", m);
 
-    read_cache.drive_input("replica_bus_ready", m.input("replica_bus_ready", 1));
-    m.output("replica_bus_enable", read_cache.output("replica_bus_enable"));
-    m.output("replica_bus_addr", read_cache.output("replica_bus_addr"));
-    read_cache.drive_input("replica_bus_read_data", m.input("replica_bus_read_data", 128));
-    read_cache.drive_input("replica_bus_read_data_valid", m.input("replica_bus_read_data_valid", 1));
+        let mut in_tex_buffer_read_addrs = Vec::new();
+        let mut out_tex_buffer_read_values = Vec::new();
+        let mut acc = None;
+        let block_caches = (0..4).map(|i| {
+            let block_cache = BlockCache::new(format!("block_cache{}", i), m);
+            block_cache.invalidate.drive(invalidate);
+            let addr = m.input(format!("in_tex_buffer{}_read_addr", i), TEX_PIXEL_ADDR_BITS);
+            block_cache.in_addr.drive(addr);
+            let return_data = block_cache.return_data;
+            let value = m.output(format!("out_tex_buffer{}_read_value", i), return_data);
 
-    let issue = m.input("issue", 1);
-    m.output("in_ready", read_cache.output("primary_bus_ready"));
-    read_cache.drive_input("primary_bus_enable", issue);
-    let in_addr = m.input("in_addr", TEX_PIXEL_ADDR_BITS);
-    read_cache.drive_input("primary_bus_addr", in_addr.bits(TEX_PIXEL_ADDR_BITS - 1, 2));
+            in_tex_buffer_read_addrs.push(addr);
+            out_tex_buffer_read_values.push(value);
 
-    let pixel_sel = m.reg("pixel_sel", 2);
-    pixel_sel.drive_next(if_(issue, {
-        in_addr.bits(1, 0)
-    }).else_({
-        pixel_sel.value
-    }));
+            block_cache_crosspar.primary_ports[i].connect(&block_cache.replica_port);
+            let in_ready = block_cache.in_ready.into();
+            let return_data_valid = block_cache.return_data_valid.into();
+            acc = Some(match acc {
+                Some((acc_in_ready, acc_return_data_valid)) => (acc_in_ready & in_ready, acc_return_data_valid & return_data_valid),
+                _ => (in_ready, return_data_valid)
+            });
 
-    let read_data = read_cache.output("primary_bus_read_data");
-    let read_pixel = if_(pixel_sel.value.eq(m.lit(0u32, 2)), {
-        read_data.bits(31, 0)
-    }).else_if(pixel_sel.value.eq(m.lit(1u32, 2)), {
-        read_data.bits(63, 32)
-    }).else_if(pixel_sel.value.eq(m.lit(2u32, 2)), {
-        read_data.bits(95, 64)
-    }).else_({
-        read_data.bits(127, 96)
-    });
+            block_cache
+        }).collect::<Vec<_>>();
+        let (caches_in_ready, caches_return_data_valid) = acc.unwrap();
 
-    let read_data_valid = read_cache.output("primary_bus_read_data_valid");
+        let out_valid = issue_buffer_occupied & caches_return_data_valid;
 
-    let return_buffer_occupied = m.reg("return_buffer_occupied", 1);
-    return_buffer_occupied.default_value(false);
-    return_buffer_occupied.drive_next(if_(issue, {
-        m.low()
-    }).else_if(read_data_valid, {
-        m.high()
-    }).else_({
-        return_buffer_occupied.value
-    }));
+        //  Note that we exploit implementation details of `ReadCache` - namely that we
+        //   know that its `primary_bus_ready` output is independent of its
+        //   `replica_bus_ready` input, so regardless of arbitration or whatever else we
+        //   connect between the caches on the replica side (which may introduce some
+        //   interdepencies), we know that they can be in a state where all of them can
+        //   accept reads simultaneously. This simplifies issue logic in this cache.
+        let can_accept_issue = caches_in_ready & (!issue_buffer_occupied | caches_return_data_valid);
+        let in_ready = m.output("in_ready", can_accept_issue);
 
-    let return_buffer_pixel = m.reg("return_buffer_pixel", 32);
-    return_buffer_pixel.drive_next(if_(read_data_valid, {
-        read_pixel
-    }).else_({
-        return_buffer_pixel.value
-    }));
+        let accept_issue = can_accept_issue & in_valid;
 
-    m.output("return_data", if_(read_data_valid, {
-        read_pixel
-    }).else_({
-        return_buffer_pixel.value
-    }));
-    m.output("return_data_valid", read_data_valid | return_buffer_occupied.value);
+        issue_buffer_occupied.drive_next(if_(accept_issue, {
+            m.high()
+        }).else_if(out_valid, {
+            m.low()
+        }).else_({
+            issue_buffer_occupied
+        }));
 
-    m
+        for block_cache in block_caches {
+            block_cache.issue.drive(accept_issue);
+        }
+
+        let mut forward_inputs = HashMap::new();
+        let mut forward_outputs = HashMap::new();
+        for (name, bit_width) in [
+            ("tile_addr", TILE_PIXELS_BITS),
+
+            ("r", 9),
+            ("g", 9),
+            ("b", 9),
+            ("a", 9),
+
+            ("z", 16),
+
+            ("depth_test_result", 1),
+
+            ("s_fract", ST_FILTER_FRACT_BITS + 1),
+            ("one_minus_s_fract", ST_FILTER_FRACT_BITS + 1),
+            ("t_fract", ST_FILTER_FRACT_BITS + 1),
+            ("one_minus_t_fract", ST_FILTER_FRACT_BITS + 1),
+        ].iter() {
+            let input = m.input(format!("in_{}", name), *bit_width);
+            let reg = m.reg(format!("{}_forward", name), *bit_width);
+            reg.drive_next(if_(accept_issue, {
+                input
+            }).else_({
+                reg
+            }));
+            let output = m.output(format!("out_{}", name), reg);
+            forward_inputs.insert(*name.into(), input);
+            forward_outputs.insert(*name.into(), output);
+        }
+
+        TexCache {
+            m,
+
+            invalidate,
+            in_valid,
+            in_ready,
+            out_valid: m.output("out_valid", out_valid),
+
+            in_tex_buffer_read_addrs,
+            out_tex_buffer_read_values,
+
+            replica_port,
+
+            forward_inputs,
+            forward_outputs,
+        }
+    }
+}
+
+pub struct BlockCache<'a> {
+    pub m: &'a Module<'a>,
+
+    pub invalidate: &'a Input<'a>,
+
+    pub replica_port: ReplicaPort<'a>,
+    pub issue: &'a Input<'a>,
+    pub in_ready: &'a Output<'a>,
+    pub in_addr: &'a Input<'a>,
+    pub return_data: &'a Output<'a>,
+    pub return_data_valid: &'a Output<'a>,
+}
+
+impl<'a> BlockCache<'a> {
+    pub fn new<S: Into<String>, P: ModuleParent<'a>>(instance_name: S, p: &'a P) -> BlockCache<'a> {
+        let m = p.module(instance_name, "BlockCache");
+
+        let invalidate = m.input("invalidate", 1);
+
+        // TODO: Properly expose/check these parameters!
+        let read_cache = ReadCache::new("read_cache", 128, TEX_WORD_ADDR_BITS, TEX_WORD_ADDR_BITS - 3, m);
+
+        read_cache.invalidate.drive(invalidate);
+
+        let replica_bus_ready = m.input("replica_bus_ready", 1);
+        read_cache.replica_port.bus_ready.drive(replica_bus_ready);
+        let replica_bus_enable = m.output("replica_bus_enable", read_cache.replica_port.bus_enable);
+        let replica_bus_addr = m.output("replica_bus_addr", read_cache.replica_port.bus_addr);
+        let replica_bus_read_data = m.input("replica_bus_read_data", 128);
+        read_cache.replica_port.bus_read_data.drive(replica_bus_read_data);
+        let replica_bus_read_data_valid = m.input("replica_bus_read_data_valid", 1);
+        read_cache.replica_port.bus_read_data_valid.drive(replica_bus_read_data_valid);
+
+        let issue = m.input("issue", 1);
+        let in_ready = m.output("in_ready", read_cache.primary_port.bus_ready);
+        read_cache.primary_port.bus_enable.drive(issue);
+        let in_addr = m.input("in_addr", TEX_PIXEL_ADDR_BITS);
+        read_cache.primary_port.bus_addr.drive(in_addr.bits(TEX_PIXEL_ADDR_BITS - 1, 2));
+
+        let pixel_sel = m.reg("pixel_sel", 2);
+        pixel_sel.drive_next(if_(issue, {
+            in_addr.bits(1, 0)
+        }).else_({
+            pixel_sel
+        }));
+
+        let read_data = read_cache.primary_port.bus_read_data;
+        let read_pixel = if_(pixel_sel.eq(m.lit(0u32, 2)), {
+            read_data.bits(31, 0)
+        }).else_if(pixel_sel.eq(m.lit(1u32, 2)), {
+            read_data.bits(63, 32)
+        }).else_if(pixel_sel.eq(m.lit(2u32, 2)), {
+            read_data.bits(95, 64)
+        }).else_({
+            read_data.bits(127, 96)
+        });
+
+        let read_data_valid = read_cache.primary_port.bus_read_data_valid;
+
+        let return_buffer_occupied = m.reg("return_buffer_occupied", 1);
+        return_buffer_occupied.default_value(false);
+        return_buffer_occupied.drive_next(if_(issue, {
+            m.low()
+        }).else_if(read_data_valid, {
+            m.high()
+        }).else_({
+            return_buffer_occupied
+        }));
+
+        let return_buffer_pixel = m.reg("return_buffer_pixel", 32);
+        return_buffer_pixel.drive_next(if_(read_data_valid, {
+            read_pixel
+        }).else_({
+            return_buffer_pixel
+        }));
+
+        let return_data = m.output("return_data", if_(read_data_valid, {
+            read_pixel
+        }).else_({
+            return_buffer_pixel
+        }));
+        let return_data_valid = m.output("return_data_valid", read_data_valid | return_buffer_occupied);
+
+        BlockCache {
+            m,
+
+            invalidate,
+
+            replica_port: ReplicaPort {
+                bus_enable: replica_bus_enable,
+                bus_addr: replica_bus_addr,
+                bus_write: m.output("replica_bus_write", m.low()),
+                bus_write_data: m.output("replica_bus_write_data", m.lit(0u32, data_bit_width)),
+                bus_write_byte_enable: m.output("replica_bus_write_byte_enable", m.lit(0u32, data_bit_width / 8)),
+                bus_ready: replica_bus_ready,
+                bus_read_data: replica_bus_read_data,
+                bus_read_data_valid: replica_bus_read_data_valid,
+            },
+            issue,
+            in_ready,
+            in_addr,
+            return_data,
+            return_data_valid,
+        }
+    }
 }

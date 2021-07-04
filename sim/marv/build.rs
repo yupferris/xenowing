@@ -13,5 +13,6 @@ fn main() -> Result<()> {
 
     let c = Context::new();
 
-    sim::generate(marv::generate(&c), sim::GenerationOptions::default(), file)
+    let marv = Marv::new("marv", &c);
+    sim::generate(marv.m, sim::GenerationOptions::default(), file)
 }
